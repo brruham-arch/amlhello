@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <string.h>
 #include <android/log.h>
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
