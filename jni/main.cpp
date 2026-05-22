@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <dlfcn.h>
-#include <string.h>
 #include <android/log.h>
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
@@ -28,7 +28,6 @@ static void wlog(const char* lv, const char* msg) {
     fprintf(f,"[%s][%s] %s\n",ts,lv,msg); fclose(f);
 }
 
-// ── Cari base libGTASA.so dari /proc/self/maps ───────────────────
 static uintptr_t getLibBase(const char* name) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return 0;
@@ -42,55 +41,55 @@ static uintptr_t getLibBase(const char* name) {
     fclose(f); return base;
 }
 
-// ── Function pointers (offset + base) ───────────────────────────
-#define OFF(base, off) ((base) + (off) + 1) // +1 Thumb
-typedef void* (*FindPlayerPed_t)(int);
-typedef void* (*GetPad_t)(int);
-typedef int   (*CollectJustDown_t)(void*);
-typedef void* (*AddPed_t)(int, unsigned int, const CVector*, bool);
-typedef void  (*WorldAdd_t)(void*);
-typedef void  (*KillMeleeCtor_t)(void*, void*);
-typedef void  (*ClearTasks_t)(void*, bool, bool);
-typedef void  (*AddTaskPrimary_t)(void*, void*, bool);
+#define FN(base, off) (void*)((base) + (off) + 1)
 
-static FindPlayerPed_t  fnFindPlayerPed;
-static GetPad_t         fnGetPad;
-static CollectJustDown_t fnCollect;
-static AddPed_t         fnAddPed;
-static WorldAdd_t       fnWorldAdd;
-static ClearTasks_t     fnClearTasks;
-static AddTaskPrimary_t fnAddTaskPrimary;
-static KillMeleeCtor_t  fnKillMeleeCtor;
-static void**           vtKillMelee;
+typedef void*    (*FindPlayerPed_t)(int);
+// FindPlayerCoords(int) → CVector* (ptr ke static buffer)
+typedef CVector* (*FindPlayerCoords_t)(int);
+typedef void*    (*GetPad_t)(int);
+typedef int      (*SprintJustDown_t)(void*);
+typedef void*    (*AddPed_t)(int, unsigned int, const CVector*, bool);
+typedef void     (*WorldAdd_t)(void*);
+typedef void     (*KillMeleeCtor_t)(void*, void*);
+typedef void     (*ClearTasks_t)(void*, bool, bool);
+typedef void     (*AddTaskPrimary_t)(void*, void*, bool);
+
+static FindPlayerPed_t    fnFindPlayerPed;
+static FindPlayerCoords_t fnFindPlayerCoords;
+static GetPad_t           fnGetPad;
+static SprintJustDown_t   fnSprint;
+static AddPed_t           fnAddPed;
+static WorldAdd_t         fnWorldAdd;
+static ClearTasks_t       fnClearTasks;
+static AddTaskPrimary_t   fnAddTaskPrimary;
+static KillMeleeCtor_t    fnKillMeleeCtor;
+static void**             vtKillMelee;
 
 static bool initFunctions(uintptr_t base) {
     char buf[64];
-    snprintf(buf,sizeof(buf),"libGTASA base: 0x%08X",(unsigned)base);
-    wlog("INIT", buf);
+    snprintf(buf,sizeof(buf),"base: 0x%08X",(unsigned)base);
+    wlog("INIT",buf);
     if (!base) return false;
-
-    fnFindPlayerPed  = (FindPlayerPed_t) OFF(base, 0x0040b288);
-    fnGetPad         = (GetPad_t)        OFF(base, 0x003f8ca4);
-    fnCollect        = (CollectJustDown_t)OFF(base, 0x003fbe14);
-    fnAddPed         = (AddPed_t)        OFF(base, 0x004cf26c);
-    fnWorldAdd       = (WorldAdd_t)      OFF(base, 0x004233c8);
-    fnClearTasks     = (ClearTasks_t)    OFF(base, 0x004c08ec);
-    fnAddTaskPrimary = (AddTaskPrimary_t)OFF(base, 0x004c04c8);
-    fnKillMeleeCtor  = (KillMeleeCtor_t) OFF(base, 0x004e17cc);
-    vtKillMelee      = (void**)(base + 0x006698c0);
+    fnFindPlayerPed    = (FindPlayerPed_t)    FN(base, 0x0040b288);
+    fnFindPlayerCoords = (FindPlayerCoords_t) FN(base, 0x0040b5dc);
+    fnGetPad           = (GetPad_t)           FN(base, 0x003f8ca4);
+    fnSprint           = (SprintJustDown_t)   FN(base, 0x003fbe14);
+    fnAddPed           = (AddPed_t)           FN(base, 0x004cf26c);
+    fnWorldAdd         = (WorldAdd_t)         FN(base, 0x004233c8);
+    fnClearTasks       = (ClearTasks_t)       FN(base, 0x004c08ec);
+    fnAddTaskPrimary   = (AddTaskPrimary_t)   FN(base, 0x004c04c8);
+    fnKillMeleeCtor    = (KillMeleeCtor_t)    FN(base, 0x004e17cc);
+    vtKillMelee        = (void**)(base + 0x006698c0);
     return true;
 }
 
-// ── Poll thread ──────────────────────────────────────────────────
 static void* pollThread(void*) {
-    // tunggu game fully loaded
     sleep(5);
-    wlog("THREAD","Poll thread started");
+    wlog("THREAD","started");
 
     uintptr_t base = getLibBase("libGTASA.so");
     if (!initFunctions(base)) {
-        wlog("THREAD","FATAL: libGTASA base not found");
-        return nullptr;
+        wlog("THREAD","FATAL: base not found"); return nullptr;
     }
 
     int cooldown = 0;
@@ -99,41 +98,45 @@ static void* pollThread(void*) {
         if (cooldown > 0) { cooldown--; continue; }
 
         void* pad = fnGetPad(0);
-        if (!pad || !fnCollect(pad)) continue;
-
+        if (!pad || !fnSprint(pad)) continue;
         cooldown = 60;
-        wlog("SPAWN","Trigger!");
 
-        void* player = fnFindPlayerPed(0);
-        if (!player) { wlog("SPAWN","player null"); continue; }
+        // posisi via FindPlayerCoords — aman, no matrix math
+        CVector* ppos = fnFindPlayerCoords(0);
+        if (!ppos || (ppos->x == 0 && ppos->y == 0)) {
+            wlog("SPAWN","coords invalid"); continue;
+        }
+        CVector spawnPos = { ppos->x + 2.0f, ppos->y, ppos->z };
 
-        float* mat = (float*)((uint8_t*)player + 0x14);
-        CVector pos = { mat[12]+2.0f, mat[13], mat[14] };
-
-        char buf[64];
-        snprintf(buf,sizeof(buf),"pos %.1f %.1f %.1f",pos.x,pos.y,pos.z);
+        char buf[80];
+        snprintf(buf,sizeof(buf),"pos %.1f %.1f %.1f",spawnPos.x,spawnPos.y,spawnPos.z);
         wlog("SPAWN",buf);
 
-        void* npc = fnAddPed(4, 0, &pos, false);
+        void* npc = fnAddPed(4, 0, &spawnPos, false);
         if (!npc) { wlog("SPAWN","AddPed null"); continue; }
         fnWorldAdd(npc);
+        wlog("SPAWN","WorldAdd OK");
 
         void* intel = *(void**)((uint8_t*)npc + 0x47C);
         if (!intel) { wlog("SPAWN","intel null"); continue; }
         fnClearTasks(intel, true, true);
+        wlog("SPAWN","ClearTasks OK");
 
+        void* player = fnFindPlayerPed(0);
         void* task = operator new(0x50);
         *(void**)task = vtKillMelee;
         fnKillMeleeCtor(task, player);
         fnAddTaskPrimary(intel, task, false);
-
-        wlog("SPAWN","NPC spawned!");
+        wlog("SPAWN","DONE — NPC spawned!");
     }
     return nullptr;
 }
 
 EXPORT ModInfo* __GetModInfo() { return &modinfo; }
-EXPORT void OnModPreLoad() { wlog("PRELOAD","OK"); }
+EXPORT void OnModPreLoad() {
+    remove(LOG_PATH); // hapus log lama
+    wlog("PRELOAD","OK");
+}
 EXPORT void OnModLoad() {
     wlog("LOAD","=== SpawnNPC Mod LOADED ===");
     pthread_t t;
