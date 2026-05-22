@@ -1,0 +1,58 @@
+name: Build AML Mod
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup NDK r25c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Build armeabi-v7a
+        run: |
+          $ANDROID_NDK_HOME/ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
+            -j$(nproc)
+
+      - name: Verify exports
+        run: |
+          SO=libs/armeabi-v7a/libAMLHello.so
+          echo "=== nm -D ==="
+          nm -D "$SO"
+          echo "=== file ==="
+          file "$SO"
+          echo "=== Cek 3 export wajib ==="
+          for sym in __GetModInfo OnModPreLoad OnModLoad; do
+            if nm -D "$SO" | grep -q "$sym"; then
+              echo "  OK: $sym"
+            else
+              echo "  MISSING: $sym" && exit 1
+            fi
+          done
+
+      - name: Package ZIP
+        run: |
+          mkdir -p dist
+          cp libs/armeabi-v7a/libAMLHello.so dist/
+          cd dist
+          zip -9 ../AMLHello.zip libAMLHello.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AMLHello-armeabi-v7a
+          path: AMLHello.zip
+          retention-days: 7
