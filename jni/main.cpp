@@ -102,6 +102,8 @@ static void* pollThread(void*) {
         cooldown = 60;
 
         // posisi via FindPlayerCoords — aman, no matrix math
+        void* _chk = fnFindPlayerPed(0);
+        if (!_chk) { wlog("SPAWN","player null, skip"); continue; }
         CVector* ppos = fnFindPlayerCoords(0);
         if (!ppos || (ppos->x == 0 && ppos->y == 0)) {
             wlog("SPAWN","coords invalid"); continue;
