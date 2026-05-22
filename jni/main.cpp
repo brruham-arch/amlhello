@@ -71,7 +71,7 @@ static bool initFunctions(uintptr_t base) {
 
     fnFindPlayerPed  = (FindPlayerPed_t) OFF(base, 0x0040b288);
     fnGetPad         = (GetPad_t)        OFF(base, 0x003f8ca4);
-    fnCollect        = (CollectJustDown_t)OFF(base, 0x003fbf40);
+    fnCollect        = (CollectJustDown_t)OFF(base, 0x003fbe14);
     fnAddPed         = (AddPed_t)        OFF(base, 0x004cf26c);
     fnWorldAdd       = (WorldAdd_t)      OFF(base, 0x004233c8);
     fnClearTasks     = (ClearTasks_t)    OFF(base, 0x004c08ec);
