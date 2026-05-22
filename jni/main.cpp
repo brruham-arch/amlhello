@@ -5,8 +5,10 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 
-// ─── AML ModInfo Interface ──────────────────────────────────────────────────
-// handlerVer = 1 wajib cocok dengan AML engine
+#define EXPORT extern "C" __attribute__((visibility("default")))
+#define TAG     "BURHAN_AML"
+#define LOG_PATH "/sdcard/burhan_aml_log.txt"
+
 struct ModInfo {
     const char* name;
     const char* version;
@@ -16,76 +18,38 @@ struct ModInfo {
 };
 
 static ModInfo modinfo = {
-    "AML Hello",          // name
-    "1.0",                // version
-    "Burhan",             // author
-    "com.burhan.amlhello",// package
-    1                     // handlerVer — WAJIB = 1
+    "AML Hello", "1.0", "Burhan", "com.burhan.amlhello", 1
 };
 
-// ─── Logger ────────────────────────────────────────────────────────────────
-#define TAG     "BURHAN_AML"
-#define LOG_PATH "/sdcard/burhan_aml_log.txt"
-
 static void wlog(const char* level, const char* msg) {
-    // Logcat
     __android_log_print(ANDROID_LOG_INFO, TAG, "[%s] %s", level, msg);
-
-    // File log ke /sdcard
     FILE* f = fopen(LOG_PATH, "a");
     if (!f) return;
-
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
     char ts[32];
     strftime(ts, sizeof(ts), "%H:%M:%S", t);
-
     fprintf(f, "[%s][%s] %s\n", ts, level, msg);
     fclose(f);
 }
 
-static void log_sysinfo() {
-    char buf[128];
-    char prop[PROP_VALUE_MAX];
+EXPORT ModInfo* __GetModInfo() { return &modinfo; }
 
-    // Android version
+EXPORT void OnModPreLoad() {
+    wlog("PRELOAD", "OnModPreLoad called");
+}
+
+EXPORT void OnModLoad() {
+    wlog("LOAD", "=== AML Hello LOADED ===");
+    char buf[64];
+    char prop[PROP_VALUE_MAX];
     __system_property_get("ro.build.version.release", prop);
     snprintf(buf, sizeof(buf), "Android: %s", prop);
-    wlog("INFO", buf);
-
-    // Device model
+    wlog("LOAD", buf);
     __system_property_get("ro.product.model", prop);
     snprintf(buf, sizeof(buf), "Device: %s", prop);
-    wlog("INFO", buf);
-
-    // ABI
-    __system_property_get("ro.product.cpu.abi", prop);
-    snprintf(buf, sizeof(buf), "ABI: %s", prop);
-    wlog("INFO", buf);
-
-    // PID
+    wlog("LOAD", buf);
     snprintf(buf, sizeof(buf), "PID: %d", (int)getpid());
-    wlog("INFO", buf);
-}
-
-// ─── AML Exports ───────────────────────────────────────────────────────────
-extern "C" ModInfo* __GetModInfo() {
-    return &modinfo;
-}
-
-extern "C" void OnModPreLoad() {
-    wlog("PRELOAD", "OnModPreLoad called");
-    wlog("PRELOAD", "AML engine recognized the mod");
-}
-
-extern "C" void OnModLoad() {
-    wlog("LOAD", "========================================");
-    wlog("LOAD", "  AML Hello Mod - LOADED SUCCESSFULLY!");
-    wlog("LOAD", "  Name    : AML Hello v1.0");
-    wlog("LOAD", "  Author  : Burhan");
-    wlog("LOAD", "  Handler : 1");
-    wlog("LOAD", "========================================");
-    log_sysinfo();
-    wlog("LOAD", "Log file: " LOG_PATH);
-    wlog("LOAD", "OnModLoad selesai.");
+    wlog("LOAD", buf);
+    wlog("LOAD", "Log: " LOG_PATH);
 }
