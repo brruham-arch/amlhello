@@ -16,7 +16,7 @@
 #define HEALTH_OFF 0x3C
 
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","4.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","5.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
 static void* g_npcs[MAX_NPCS] = {};
@@ -44,7 +44,7 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-typedef void  (*KillMeleeCtor_t)(void*,void*);  // CTaskComplexKillPedOnFootMelee — tangan kosong
+typedef void  (*KillMeleeCtor_t)(void*,void*);
 typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
 
 static FindPlayerPed_t  fnFindPlayerPed;
@@ -64,54 +64,53 @@ static bool getPedPos(void* ped, CVector& out) {
 }
 static bool isPedAlive(void* ped) {
     if(!ped) return false;
-    float hp=*(float*)((uint8_t*)ped+HEALTH_OFF);
-    return hp > 0.1f;
+    return *(float*)((uint8_t*)ped+HEALTH_OFF) > 0.1f;
 }
 
-// TIDAK ada ClearTasks — penyebab race condition crash
-// AddTaskPrimary(intel, task, true) — true = flush/override task yang ada
+// Gunakan malloc — heap sama dengan GTA SA, bukan heap .so kita
+// false = jangan flush task lama, cukup tambah sebagai primary baru
 static void assignMeleeTask(void* attacker, void* target) {
     if(!attacker||!target) return;
     if(!isPedAlive(attacker)||!isPedAlive(target)) return;
-
     void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
 
-    void* task=operator new(0x100);
-    memset(task,0,0x100);
-    fnKillMeleeCtor(task, target);          // melee ctor — paksa tangan kosong
-    fnAddTaskPrimary(intel, task, true);    // true = override task lama tanpa destroy manual
+    void* task = malloc(0x200);
+    if(!task) return;
+    memset(task, 0, 0x200);
+    fnKillMeleeCtor(task, target);
+    fnAddTaskPrimary(intel, task, false); // false — tidak destroy task lama dari luar
 }
 
-// Monitor thread — reassign tiap 2 detik, TANPA ClearTasks
+// Monitor thread ringan — hanya reassign NPC yang sudah tidak punya target hidup
+// Tidak ada malloc/free di sini, hanya cek status
 static void* monitorThread(void*) {
     sleep(12);
-    wlog("MONITOR","started");
-    while(true){
-        usleep(2000000); // 2 detik — lebih jarang = lebih aman dari race condition
+    wlog("MON","started");
+    while(true) {
+        usleep(3000000); // 3 detik — cukup jarang
 
         pthread_mutex_lock(&g_lock);
-        int count=g_npcCount;
+        int count = g_npcCount;
         void* snap[MAX_NPCS];
-        memcpy(snap,g_npcs,sizeof(void*)*count);
+        memcpy(snap, g_npcs, sizeof(void*)*count);
         pthread_mutex_unlock(&g_lock);
 
-        if(count<2) continue;
+        if(count < 2) continue;
 
-        void* alive[MAX_NPCS];
-        int ac=0;
+        // Kumpulkan yang hidup
+        void* alive[MAX_NPCS]; int ac=0;
         for(int i=0;i<count;i++)
-            if(isPedAlive(snap[i]))
-                alive[ac++]=snap[i];
+            if(isPedAlive(snap[i])) alive[ac++]=snap[i];
 
-        if(ac<2) continue;
+        if(ac < 2) continue;
 
-        // Round-robin: tiap NPC serang NPC berikutnya
+        // Reassign round-robin — hanya pakai malloc, tidak ada free/delete task
         for(int i=0;i<ac;i++)
             assignMeleeTask(alive[i], alive[(i+1)%ac]);
 
         char buf[32];
-        snprintf(buf,sizeof(buf),"alive:%d reassigned",ac);
+        snprintf(buf,sizeof(buf),"alive:%d",ac);
         wlog("MON",buf);
     }
     return nullptr;
@@ -130,7 +129,7 @@ static void* pollThread(void*) {
     fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
     fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc); // KillPedOnFootMelee
+    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
 
     int cd=0;
     while(true){
@@ -147,8 +146,6 @@ static void* pollThread(void*) {
         pthread_mutex_lock(&g_lock);
         if(g_npcCount>=MAX_NPCS-1){ g_npcCount=0; memset(g_npcs,0,sizeof(g_npcs)); }
 
-        // Pakai PED_TYPE_CIVMALE (4) untuk keduanya — tidak ada weapon default
-        // Task melee akan paksa mereka bertarung walau relasi netral
         CVector sp1={pos.x+3.0f, pos.y,      pos.z};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
 
@@ -159,15 +156,15 @@ static void* pollThread(void*) {
         if(npc2){ fnWorldAdd(npc2); g_npcs[g_npcCount++]=npc2; }
 
         char buf[48];
-        snprintf(buf,sizeof(buf),"spawned civmale x2, total:%d",g_npcCount);
+        snprintf(buf,sizeof(buf),"spawned, total:%d",g_npcCount);
         wlog("SPAWN",buf);
         pthread_mutex_unlock(&g_lock);
 
-        // Assign task awal langsung setelah spawn
+        // Assign task awal — malloc, bukan operator new
         if(npc1&&npc2){
             assignMeleeTask(npc1,npc2);
             assignMeleeTask(npc2,npc1);
-            wlog("SPAWN","melee task assigned");
+            wlog("SPAWN","task assigned OK");
         }
     }
     return nullptr;
@@ -176,7 +173,7 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v4 — melee only, no ClearTasks ===");
+    wlog("LOAD","=== FightNPC v5 — malloc heap fix ===");
     pthread_t t1,t2;
     pthread_create(&t1,nullptr,pollThread,nullptr);    pthread_detach(t1);
     pthread_create(&t2,nullptr,monitorThread,nullptr); pthread_detach(t2);
