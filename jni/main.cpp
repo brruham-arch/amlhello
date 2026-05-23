@@ -108,7 +108,7 @@ static void* pollThread(void*) {
         fnClearTasks(intel,true,true);
         wlog("SPAWN","ClearTasks OK");
 
-        void* task=operator new(0x50);
+        void* task=operator new(0x100); memset(task,0,0x100);
         *(void**)task=vtKillMelee;
         fnKillMeleeCtor(task,player);
         fnAddTaskPrimary(intel,task,false);
