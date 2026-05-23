@@ -84,7 +84,7 @@ static bool initFunctions(uintptr_t base) {
 }
 
 static void* pollThread(void*) {
-    sleep(5);
+    sleep(10);
     wlog("THREAD","started");
 
     uintptr_t base = getLibBase("libGTASA.so");
