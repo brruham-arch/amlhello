@@ -9,19 +9,18 @@
 #define EXPORT extern "C" __attribute__((visibility("default")))
 #define TAG      "BURHAN_AML"
 #define LOG_PATH "/sdcard/burhan_aml_log.txt"
-#define MAX_NPCS    32
-#define MATRIX_OFF  0x14
-#define POS_OFF     0x30
-#define INTEL_OFF   0x440
-#define HEALTH_OFF  0x3C   // dari scan: +0x3C=100.0
+#define MAX_NPCS   32
+#define MATRIX_OFF 0x14
+#define POS_OFF    0x30
+#define INTEL_OFF  0x440
+#define HEALTH_OFF 0x3C
 
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","2.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","3.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
-// ── NPC registry ─────────────────────────────────────────────────
-static void*         g_npcs[MAX_NPCS] = {};
-static int           g_npcCount = 0;
+static void* g_npcs[MAX_NPCS] = {};
+static int   g_npcCount = 0;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void wlog(const char* lv, const char* msg) {
@@ -45,9 +44,12 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-typedef void  (*KillMeleeCtor_t)(void*,void*);
 typedef void  (*ClearTasks_t)(void*,bool,bool);
 typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
+
+// CTaskComplexKillPedOnFoot - versi penuh, lebih agresif
+// sig: ctor(CPed* target, int maxKills, uint wpn1, uint wpn2, uint flags, int startTime)
+typedef void* (*KillPedCtor_t)(void*, void*, int, unsigned int, unsigned int, unsigned int, int);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
@@ -56,9 +58,8 @@ static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
 static ClearTasks_t     fnClearTasks;
 static AddTaskPrimary_t fnAddTaskPrimary;
-static KillMeleeCtor_t  fnKillMeleeCtor;
+static KillPedCtor_t    fnKillPedCtor;
 
-// ── Helper ────────────────────────────────────────────────────────
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
     void* mx=*(void**)((uint8_t*)ped+MATRIX_OFF);
@@ -66,71 +67,65 @@ static bool getPedPos(void* ped, CVector& out) {
     out=*(CVector*)((uint8_t*)mx+POS_OFF);
     return true;
 }
-
-// Ped dianggap hidup jika health > 0
 static bool isPedAlive(void* ped) {
     if(!ped) return false;
-    float hp = *(float*)((uint8_t*)ped + HEALTH_OFF);
+    float hp=*(float*)((uint8_t*)ped+HEALTH_OFF);
     return hp > 0.1f;
 }
 
 static void assignKillTask(void* attacker, void* target) {
-    if(!attacker || !target) return;
-    if(!isPedAlive(attacker) || !isPedAlive(target)) return;
+    if(!attacker||!target) return;
+    if(!isPedAlive(attacker)||!isPedAlive(target)) return;
 
-    void* intel = *(void**)((uint8_t*)attacker + INTEL_OFF);
+    void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
 
-    fnClearTasks(intel, true, true);
+    fnClearTasks(intel,true,true);
 
-    void* task = operator new(0x200);
-    memset(task, 0, 0x200);
-    fnKillMeleeCtor(task, target);
-    fnAddTaskPrimary(intel, task, false);
+    void* task=operator new(0x200);
+    memset(task,0,0x200);
+
+    // CTaskComplexKillPedOnFoot(target, maxKills=-1, wpn1=0, wpn2=0, flags=0, startTime=0)
+    // maxKills=-1 = serang terus tanpa batas
+    // flags=0x8 = force kill (tidak mundur/flee)
+    fnKillPedCtor(task, target, -1, 0, 0, 0x8, 0);
+
+    fnAddTaskPrimary(intel,task,false);
 }
 
-// ── Monitor thread — reassign task tiap 500ms ─────────────────────
-// Efek: anti-flee + target baru otomatis saat target mati
 static void* monitorThread(void*) {
     sleep(12);
     wlog("MONITOR","started");
+    while(true){
+        usleep(500000);
 
-    while(true) {
-        usleep(500000); // 500ms
-
-        // Snapshot registry dengan lock
         pthread_mutex_lock(&g_lock);
-        int count = g_npcCount;
+        int count=g_npcCount;
         void* snap[MAX_NPCS];
-        memcpy(snap, g_npcs, sizeof(void*)*count);
+        memcpy(snap,g_npcs,sizeof(void*)*count);
         pthread_mutex_unlock(&g_lock);
 
-        if(count < 2) continue;
+        if(count<2) continue;
 
-        // Cari semua NPC yang masih hidup
         void* alive[MAX_NPCS];
-        int   aliveCount = 0;
+        int   ac=0;
         for(int i=0;i<count;i++)
             if(isPedAlive(snap[i]))
-                alive[aliveCount++] = snap[i];
+                alive[ac++]=snap[i];
 
-        if(aliveCount < 2) continue;
+        if(ac<2) continue;
 
-        // Tiap NPC hidup → serang NPC hidup lain secara round-robin
-        for(int i=0;i<aliveCount;i++) {
-            // target = NPC berikutnya dalam list (round-robin)
-            int targetIdx = (i+1) % aliveCount;
-            assignKillTask(alive[i], alive[targetIdx]);
-        }
+        // Tiap NPC serang NPC lain (round-robin)
+        for(int i=0;i<ac;i++)
+            assignKillTask(alive[i], alive[(i+1)%ac]);
 
         char buf[32];
-        snprintf(buf,sizeof(buf),"alive: %d",aliveCount);
+        snprintf(buf,sizeof(buf),"alive:%d",ac);
         wlog("MON",buf);
     }
     return nullptr;
 }
 
-// ── Spawn thread — poll trigger ───────────────────────────────────
 static void* pollThread(void*) {
     sleep(10);
     wlog("THREAD","started");
@@ -145,9 +140,12 @@ static void* pollThread(void*) {
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
     fnClearTasks    =(ClearTasks_t)    FN(base,0x004c08ec);
     fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
+
+    // CTaskComplexKillPedOnFoot versi penuh
+    fnKillPedCtor   =(KillPedCtor_t)   FN(base,0x004e01b0);
 
     int cd=0;
+    int spawnGroup=0; // alternasi grup per trigger
     while(true){
         usleep(50000);
         if(cd>0){cd--;continue;}
@@ -160,28 +158,31 @@ static void* pollThread(void*) {
         if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
         pthread_mutex_lock(&g_lock);
-        if(g_npcCount >= MAX_NPCS-1){
-            wlog("SPAWN","registry full, reset");
-            g_npcCount = 0;
-            memset(g_npcs, 0, sizeof(g_npcs));
-        }
+        if(g_npcCount>=MAX_NPCS-1){ g_npcCount=0; memset(g_npcs,0,sizeof(g_npcs)); }
 
-        // Spawn 2 NPC baru setiap trigger
+        // Alternasi tipe ped per trigger:
+        // grup A = PED_TYPE_GANG1 (8)
+        // grup B = PED_TYPE_GANG2 (9)
+        // Gang berbeda = relasi musuh secara default di GTA SA
+        int typeA = (spawnGroup%2==0) ? 8 : 9;
+        int typeB = (spawnGroup%2==0) ? 9 : 8;
+        spawnGroup++;
+
         CVector sp1={pos.x+3.0f, pos.y,      pos.z};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
 
-        void* npc1=fnAddPed(4,0,&sp1,false);
-        void* npc2=fnAddPed(4,0,&sp2,false);
+        void* npc1=fnAddPed(typeA,0,&sp1,false);
+        void* npc2=fnAddPed(typeB,0,&sp2,false);
 
-        char buf[64];
         if(npc1){ fnWorldAdd(npc1); g_npcs[g_npcCount++]=npc1; }
         if(npc2){ fnWorldAdd(npc2); g_npcs[g_npcCount++]=npc2; }
 
-        snprintf(buf,sizeof(buf),"spawned, total registry: %d",g_npcCount);
+        char buf[48];
+        snprintf(buf,sizeof(buf),"spawned type %d vs %d, total:%d",typeA,typeB,g_npcCount);
         wlog("SPAWN",buf);
         pthread_mutex_unlock(&g_lock);
 
-        // Assign task awal langsung (monitor akan maintain)
+        // Assign task awal langsung
         if(npc1&&npc2){
             assignKillTask(npc1,npc2);
             assignKillTask(npc2,npc1);
@@ -193,8 +194,8 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v2 ===");
+    wlog("LOAD","=== FightNPC v3 ===");
     pthread_t t1,t2;
-    pthread_create(&t1,nullptr,pollThread,nullptr);   pthread_detach(t1);
+    pthread_create(&t1,nullptr,pollThread,nullptr);    pthread_detach(t1);
     pthread_create(&t2,nullptr,monitorThread,nullptr); pthread_detach(t2);
 }
