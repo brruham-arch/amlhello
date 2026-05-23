@@ -16,7 +16,7 @@
 #define HEALTH_OFF 0x3C
 
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","3.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","4.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
 static void* g_npcs[MAX_NPCS] = {};
@@ -44,21 +44,16 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-typedef void  (*ClearTasks_t)(void*,bool,bool);
+typedef void  (*KillMeleeCtor_t)(void*,void*);  // CTaskComplexKillPedOnFootMelee — tangan kosong
 typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
-
-// CTaskComplexKillPedOnFoot - versi penuh, lebih agresif
-// sig: ctor(CPed* target, int maxKills, uint wpn1, uint wpn2, uint flags, int startTime)
-typedef void* (*KillPedCtor_t)(void*, void*, int, unsigned int, unsigned int, unsigned int, int);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
 static SprintJustDown_t fnSprint;
 static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
-static ClearTasks_t     fnClearTasks;
 static AddTaskPrimary_t fnAddTaskPrimary;
-static KillPedCtor_t    fnKillPedCtor;
+static KillMeleeCtor_t  fnKillMeleeCtor;
 
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
@@ -73,31 +68,27 @@ static bool isPedAlive(void* ped) {
     return hp > 0.1f;
 }
 
-static void assignKillTask(void* attacker, void* target) {
+// TIDAK ada ClearTasks — penyebab race condition crash
+// AddTaskPrimary(intel, task, true) — true = flush/override task yang ada
+static void assignMeleeTask(void* attacker, void* target) {
     if(!attacker||!target) return;
     if(!isPedAlive(attacker)||!isPedAlive(target)) return;
 
     void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
 
-    fnClearTasks(intel,true,true);
-
-    void* task=operator new(0x200);
-    memset(task,0,0x200);
-
-    // CTaskComplexKillPedOnFoot(target, maxKills=-1, wpn1=0, wpn2=0, flags=0, startTime=0)
-    // maxKills=-1 = serang terus tanpa batas
-    // flags=0x8 = force kill (tidak mundur/flee)
-    fnKillPedCtor(task, target, -1, 0, 0, 0x8, 0);
-
-    fnAddTaskPrimary(intel,task,false);
+    void* task=operator new(0x100);
+    memset(task,0,0x100);
+    fnKillMeleeCtor(task, target);          // melee ctor — paksa tangan kosong
+    fnAddTaskPrimary(intel, task, true);    // true = override task lama tanpa destroy manual
 }
 
+// Monitor thread — reassign tiap 2 detik, TANPA ClearTasks
 static void* monitorThread(void*) {
     sleep(12);
     wlog("MONITOR","started");
     while(true){
-        usleep(500000);
+        usleep(2000000); // 2 detik — lebih jarang = lebih aman dari race condition
 
         pthread_mutex_lock(&g_lock);
         int count=g_npcCount;
@@ -108,19 +99,19 @@ static void* monitorThread(void*) {
         if(count<2) continue;
 
         void* alive[MAX_NPCS];
-        int   ac=0;
+        int ac=0;
         for(int i=0;i<count;i++)
             if(isPedAlive(snap[i]))
                 alive[ac++]=snap[i];
 
         if(ac<2) continue;
 
-        // Tiap NPC serang NPC lain (round-robin)
+        // Round-robin: tiap NPC serang NPC berikutnya
         for(int i=0;i<ac;i++)
-            assignKillTask(alive[i], alive[(i+1)%ac]);
+            assignMeleeTask(alive[i], alive[(i+1)%ac]);
 
         char buf[32];
-        snprintf(buf,sizeof(buf),"alive:%d",ac);
+        snprintf(buf,sizeof(buf),"alive:%d reassigned",ac);
         wlog("MON",buf);
     }
     return nullptr;
@@ -138,14 +129,10 @@ static void* pollThread(void*) {
     fnSprint        =(SprintJustDown_t)FN(base,0x003fbe14);
     fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
-    fnClearTasks    =(ClearTasks_t)    FN(base,0x004c08ec);
     fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-
-    // CTaskComplexKillPedOnFoot versi penuh
-    fnKillPedCtor   =(KillPedCtor_t)   FN(base,0x004e01b0);
+    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc); // KillPedOnFootMelee
 
     int cd=0;
-    int spawnGroup=0; // alternasi grup per trigger
     while(true){
         usleep(50000);
         if(cd>0){cd--;continue;}
@@ -160,32 +147,27 @@ static void* pollThread(void*) {
         pthread_mutex_lock(&g_lock);
         if(g_npcCount>=MAX_NPCS-1){ g_npcCount=0; memset(g_npcs,0,sizeof(g_npcs)); }
 
-        // Alternasi tipe ped per trigger:
-        // grup A = PED_TYPE_GANG1 (8)
-        // grup B = PED_TYPE_GANG2 (9)
-        // Gang berbeda = relasi musuh secara default di GTA SA
-        int typeA = (spawnGroup%2==0) ? 8 : 9;
-        int typeB = (spawnGroup%2==0) ? 9 : 8;
-        spawnGroup++;
-
+        // Pakai PED_TYPE_CIVMALE (4) untuk keduanya — tidak ada weapon default
+        // Task melee akan paksa mereka bertarung walau relasi netral
         CVector sp1={pos.x+3.0f, pos.y,      pos.z};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
 
-        void* npc1=fnAddPed(typeA,0,&sp1,false);
-        void* npc2=fnAddPed(typeB,0,&sp2,false);
+        void* npc1=fnAddPed(4,0,&sp1,false);
+        void* npc2=fnAddPed(4,0,&sp2,false);
 
         if(npc1){ fnWorldAdd(npc1); g_npcs[g_npcCount++]=npc1; }
         if(npc2){ fnWorldAdd(npc2); g_npcs[g_npcCount++]=npc2; }
 
         char buf[48];
-        snprintf(buf,sizeof(buf),"spawned type %d vs %d, total:%d",typeA,typeB,g_npcCount);
+        snprintf(buf,sizeof(buf),"spawned civmale x2, total:%d",g_npcCount);
         wlog("SPAWN",buf);
         pthread_mutex_unlock(&g_lock);
 
-        // Assign task awal langsung
+        // Assign task awal langsung setelah spawn
         if(npc1&&npc2){
-            assignKillTask(npc1,npc2);
-            assignKillTask(npc2,npc1);
+            assignMeleeTask(npc1,npc2);
+            assignMeleeTask(npc2,npc1);
+            wlog("SPAWN","melee task assigned");
         }
     }
     return nullptr;
@@ -194,7 +176,7 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v3 ===");
+    wlog("LOAD","=== FightNPC v4 — melee only, no ClearTasks ===");
     pthread_t t1,t2;
     pthread_create(&t1,nullptr,pollThread,nullptr);    pthread_detach(t1);
     pthread_create(&t2,nullptr,monitorThread,nullptr); pthread_detach(t2);
