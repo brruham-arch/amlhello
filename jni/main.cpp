@@ -35,23 +35,27 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-typedef void  (*KillMeleeCtor_t)(void*,void*);
+// CTaskComplexKillPedOnFoot ctor(CPed* target, int, uint, uint, uint, int)
+typedef void  (*KillPedCtor_t)(void*,void*,int,unsigned,unsigned,unsigned,int);
 typedef void  (*ClearTasks_t)(void*,bool,bool);
 typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
+// SetPedDecisionMaker sebagai fallback
+typedef void  (*SetDecision_t)(void*,int);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
 static SprintJustDown_t fnSprint;
 static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
+static KillPedCtor_t    fnKillPedCtor;
 static ClearTasks_t     fnClearTasks;
 static AddTaskPrimary_t fnAddTaskPrimary;
-static KillMeleeCtor_t  fnKillMeleeCtor;
-static void**           vtKillMelee;
+static SetDecision_t    fnSetDecision;
+static void**           vtKillPed;  // CTaskComplexKillPedOnFoot vtable
 
-#define MATRIX_OFF  0x14   // CPed → m_matrix ptr
-#define POS_OFF     0x30   // CMatrix → pos
-#define INTEL_OFF   0x440  // CPed → m_pIntelligence (confirmed)
+#define MATRIX_OFF  0x14
+#define POS_OFF     0x30
+#define INTEL_OFF   0x440
 
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
@@ -72,10 +76,12 @@ static void* pollThread(void*) {
     fnSprint        =(SprintJustDown_t)FN(base,0x003fbe14);
     fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
+    // CTaskComplexKillPedOnFoot (bukan Melee)
+    fnKillPedCtor   =(KillPedCtor_t)   FN(base,0x004e01b0);
     fnClearTasks    =(ClearTasks_t)    FN(base,0x004c08ec);
     fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
-    vtKillMelee     =(void**)(base+0x006698c0);
+    fnSetDecision   =(SetDecision_t)   FN(base,0x004be294);
+    vtKillPed       =(void**)(base+0x00669848); // CTaskComplexKillPedOnFoot vtable
 
     int cd=0;
     while(true){
@@ -83,8 +89,7 @@ static void* pollThread(void*) {
         if(cd>0){cd--;continue;}
         void* pad=fnGetPad(0);
         if(!pad||!fnSprint(pad)) continue;
-        cd=60;
-        wlog("SPAWN","Trigger!");
+        cd=120; // 6 detik cooldown — cukup waktu animasi siap
 
         void* player=fnFindPlayerPed(0);
         CVector pos;
@@ -98,21 +103,23 @@ static void* pollThread(void*) {
         void* npc=fnAddPed(4,0,&sp,false);
         if(!npc){wlog("SPAWN","AddPed null");continue;}
         fnWorldAdd(npc);
-        wlog("SPAWN","WorldAdd OK");
+
+        // Kasih waktu game init model NPC sebelum assign task
+        usleep(500000); // 500ms
 
         void* intel=*(void**)((uint8_t*)npc+INTEL_OFF);
-        snprintf(buf,sizeof(buf),"intel=0x%08X",(unsigned)intel);
-        wlog("SPAWN",buf);
         if(!intel){wlog("SPAWN","intel null");continue;}
 
         fnClearTasks(intel,true,true);
-        wlog("SPAWN","ClearTasks OK");
 
-        void* task=operator new(0x100); memset(task,0,0x100);
-        *(void**)task=vtKillMelee;
-        fnKillMeleeCtor(task,player);
+        // Buat task: CTaskComplexKillPedOnFoot(target, 0, 0, 0, 0, 0)
+        void* task=operator new(0x100);
+        memset(task,0,0x100);
+        *(void**)task=vtKillPed;
+        fnKillPedCtor(task,player,0,0,0,0,0);
         fnAddTaskPrimary(intel,task,false);
-        wlog("SPAWN","DONE! NPC marah spawned");
+
+        wlog("SPAWN","NPC hostile spawned!");
     }
     return nullptr;
 }
@@ -120,6 +127,6 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== SpawnNPC v2 ===");
+    wlog("LOAD","=== SpawnNPC v3 ===");
     pthread_t t; pthread_create(&t,nullptr,pollThread,nullptr); pthread_detach(t);
 }
