@@ -33,19 +33,46 @@ static uintptr_t getLibBase(const char* name) {
 typedef void* (*FindPlayerPed_t)(int);
 typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
+typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
+typedef void  (*WorldAdd_t)(void*);
+typedef void  (*KillMeleeCtor_t)(void*,void*);
+typedef void  (*ClearTasks_t)(void*,bool,bool);
+typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
 static SprintJustDown_t fnSprint;
+static AddPed_t         fnAddPed;
+static WorldAdd_t       fnWorldAdd;
+static ClearTasks_t     fnClearTasks;
+static AddTaskPrimary_t fnAddTaskPrimary;
+static KillMeleeCtor_t  fnKillMeleeCtor;
+static void**           vtKillMelee;
+
+// Baca posisi dari CPed: matrix ptr di +0x14, pos di matrix+0x30
+static bool getPedPos(void* ped, CVector& out) {
+    if(!ped) return false;
+    void* mx = *(void**)((uint8_t*)ped+0x14);
+    if(!mx) return false;
+    out = *(CVector*)((uint8_t*)mx+0x30);
+    return (out.x!=0||out.y!=0);
+}
 
 static void* pollThread(void*) {
     sleep(10); wlog("THREAD","started");
     uintptr_t base=getLibBase("libGTASA.so");
     if(!base){wlog("THREAD","no base");return nullptr;}
     char b[48]; snprintf(b,sizeof(b),"base:0x%08X",(unsigned)base); wlog("INIT",b);
-    fnFindPlayerPed=(FindPlayerPed_t)FN(base,0x0040b288);
-    fnGetPad=(GetPad_t)FN(base,0x003f8ca4);
-    fnSprint=(SprintJustDown_t)FN(base,0x003fbe14);
+
+    fnFindPlayerPed =(FindPlayerPed_t) FN(base,0x0040b288);
+    fnGetPad        =(GetPad_t)        FN(base,0x003f8ca4);
+    fnSprint        =(SprintJustDown_t)FN(base,0x003fbe14);
+    fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
+    fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
+    fnClearTasks    =(ClearTasks_t)    FN(base,0x004c08ec);
+    fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
+    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
+    vtKillMelee     =(void**)(base+0x006698c0);
 
     int cd=0;
     while(true){
@@ -54,34 +81,32 @@ static void* pollThread(void*) {
         void* pad=fnGetPad(0);
         if(!pad||!fnSprint(pad)) continue;
         cd=60;
+        wlog("SPAWN","Trigger!");
 
-        void* ped=fnFindPlayerPed(0);
-        if(!ped){wlog("SCAN","ped null");continue;}
-        snprintf(b,sizeof(b),"ped=0x%08X",(unsigned)ped); wlog("SCAN",b);
+        void* player=fnFindPlayerPed(0);
+        CVector pos;
+        if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
-        // Scan ped+0x00 ~ +0xA0
-        for(int off=0;off<=0xA0;off+=4){
-            uint32_t raw=*(uint32_t*)((uint8_t*)ped+off);
-            float fv=*(float*)&raw;
-            if(raw>0x80000000u&&raw<0xFF000000u){
-                snprintf(b,sizeof(b),"  +0x%02X ptr=0x%08X",off,raw); wlog("SCAN",b);
-            } else if((fv>10||fv<-10)&&fv>-5000&&fv<5000){
-                snprintf(b,sizeof(b),"  +0x%02X flt=%.1f",off,fv); wlog("SCAN",b);
-            }
-        }
+        char buf[64];
+        snprintf(buf,sizeof(buf),"pos %.1f %.1f %.1f",pos.x,pos.y,pos.z);
+        wlog("SPAWN",buf);
 
-        // Scan isi matrix di ptr+0x14
-        void* mx=*(void**)((uint8_t*)ped+0x14);
-        if(mx){
-            snprintf(b,sizeof(b),"  mx=0x%08X",(unsigned)mx); wlog("SCAN",b);
-            for(int mo=0;mo<=0x50;mo+=4){
-                float fv=*(float*)((uint8_t*)mx+mo);
-                if((fv>10||fv<-10)&&fv>-5000&&fv<5000){
-                    snprintf(b,sizeof(b),"  mx+0x%02X=%.1f",mo,fv); wlog("SCAN",b);
-                }
-            }
-        }
-        wlog("SCAN","---");
+        CVector sp={pos.x+2.0f,pos.y,pos.z};
+        void* npc=fnAddPed(4,0,&sp,false);
+        if(!npc){wlog("SPAWN","AddPed null");continue;}
+        fnWorldAdd(npc);
+        wlog("SPAWN","WorldAdd OK");
+
+        void* intel=*(void**)((uint8_t*)npc+0x47C);
+        if(!intel){wlog("SPAWN","intel null");continue;}
+        fnClearTasks(intel,true,true);
+        wlog("SPAWN","ClearTasks OK");
+
+        void* task=operator new(0x50);
+        *(void**)task=vtKillMelee;
+        fnKillMeleeCtor(task,player);
+        fnAddTaskPrimary(intel,task,false);
+        wlog("SPAWN","DONE!");
     }
     return nullptr;
 }
@@ -89,6 +114,6 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== SCAN ===");
+    wlog("LOAD","=== SpawnNPC ===");
     pthread_t t; pthread_create(&t,nullptr,pollThread,nullptr); pthread_detach(t);
 }
