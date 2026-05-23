@@ -76,16 +76,31 @@ static bool initFunctions(uintptr_t base) {
     return true;
 }
 
-// Baca posisi dari CPed struct langsung — tidak perlu FindPlayerCoors
-// CPlaceable: vtable@+0, m_matrix ptr@+4, matrix.pos@+0x30
 static bool getPedPos(void* ped, CVector& out) {
-    if (!ped) return false;
+    if (!ped) { wlog("POS","ped null"); return false; }
+
+    char b[64];
+    snprintf(b,sizeof(b),"ped=0x%08X",(unsigned)ped);
+    wlog("POS",b);
+
+    // Coba m_matrix pointer di +0x04
     void* matrix = *(void**)((uint8_t*)ped + 0x04);
-    if (!matrix) return false;
-    out = *(CVector*)((uint8_t*)matrix + 0x30);
-    // sanity check — koordinat valid di peta GTA SA
-    if (out.x < -3000 || out.x > 3000 ||
-        out.y < -3000 || out.y > 3000) return false;
+    snprintf(b,sizeof(b),"matrix@+4=0x%08X",(unsigned)matrix);
+    wlog("POS",b);
+
+    if (matrix && (uintptr_t)matrix > 0x10000) {
+        // matrix valid — pos di matrix+0x30
+        out = *(CVector*)((uint8_t*)matrix + 0x30);
+        snprintf(b,sizeof(b),"matpos %.1f %.1f %.1f",out.x,out.y,out.z);
+        wlog("POS",b);
+    } else {
+        // m_matrix null — fallback ke CSimpleTransform di ped+0x08
+        out = *(CVector*)((uint8_t*)ped + 0x08);
+        snprintf(b,sizeof(b),"simpos %.1f %.1f %.1f",out.x,out.y,out.z);
+        wlog("POS",b);
+    }
+
+    if (out.x == 0 && out.y == 0 && out.z == 0) { wlog("POS","all zero"); return false; }
     return true;
 }
 
@@ -93,7 +108,7 @@ static void* pollThread(void*) {
     sleep(10);
     wlog("THREAD","started");
     uintptr_t base = getLibBase("libGTASA.so");
-    if (!initFunctions(base)) { wlog("THREAD","FATAL: no base"); return nullptr; }
+    if (!initFunctions(base)) { wlog("THREAD","FATAL"); return nullptr; }
 
     int cooldown = 0;
     while (true) {
@@ -103,22 +118,20 @@ static void* pollThread(void*) {
         void* pad = fnGetPad(0);
         if (!pad || !fnSprint(pad)) continue;
         cooldown = 60;
+        wlog("SPAWN","Trigger!");
 
         void* player = fnFindPlayerPed(0);
         CVector pos;
-        if (!getPedPos(player, pos)) {
-            wlog("SPAWN","pos invalid, skip"); continue;
-        }
+        if (!getPedPos(player, pos)) continue;
 
         char buf[64];
-        snprintf(buf,sizeof(buf),"pos %.1f %.1f %.1f",pos.x,pos.y,pos.z);
+        snprintf(buf,sizeof(buf),"spawn at %.1f %.1f %.1f",pos.x+2,pos.y,pos.z);
         wlog("SPAWN",buf);
 
         CVector spawnPos = {pos.x+2.0f, pos.y, pos.z};
         void* npc = fnAddPed(4, 0, &spawnPos, false);
         if (!npc) { wlog("SPAWN","AddPed null"); continue; }
         fnWorldAdd(npc);
-        wlog("SPAWN","WorldAdd OK");
 
         void* intel = *(void**)((uint8_t*)npc + 0x47C);
         if (!intel) { wlog("SPAWN","intel null"); continue; }
