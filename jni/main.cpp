@@ -35,27 +35,25 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-// CTaskComplexKillPedOnFoot ctor(CPed* target, int, uint, uint, uint, int)
-typedef void  (*KillPedCtor_t)(void*,void*,int,unsigned,unsigned,unsigned,int);
 typedef void  (*ClearTasks_t)(void*,bool,bool);
-typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
-// SetPedDecisionMaker sebagai fallback
+// SetPedDecisionMakerType(int type)
 typedef void  (*SetDecision_t)(void*,int);
+// SetSeeingRange + SetHearingRange biar agresif penuh
+typedef void  (*SetRange_t)(void*,float);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
 static SprintJustDown_t fnSprint;
 static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
-static KillPedCtor_t    fnKillPedCtor;
 static ClearTasks_t     fnClearTasks;
-static AddTaskPrimary_t fnAddTaskPrimary;
 static SetDecision_t    fnSetDecision;
-static void**           vtKillPed;  // CTaskComplexKillPedOnFoot vtable
+static SetRange_t       fnSetSeeing;
+static SetRange_t       fnSetHearing;
 
-#define MATRIX_OFF  0x14
-#define POS_OFF     0x30
-#define INTEL_OFF   0x440
+#define MATRIX_OFF 0x14
+#define POS_OFF    0x30
+#define INTEL_OFF  0x440
 
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
@@ -71,17 +69,15 @@ static void* pollThread(void*) {
     if(!base){wlog("THREAD","no base");return nullptr;}
     char b[48]; snprintf(b,sizeof(b),"base:0x%08X",(unsigned)base); wlog("INIT",b);
 
-    fnFindPlayerPed =(FindPlayerPed_t) FN(base,0x0040b288);
-    fnGetPad        =(GetPad_t)        FN(base,0x003f8ca4);
-    fnSprint        =(SprintJustDown_t)FN(base,0x003fbe14);
-    fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
-    fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
-    // CTaskComplexKillPedOnFoot (bukan Melee)
-    fnKillPedCtor   =(KillPedCtor_t)   FN(base,0x004e01b0);
-    fnClearTasks    =(ClearTasks_t)    FN(base,0x004c08ec);
-    fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-    fnSetDecision   =(SetDecision_t)   FN(base,0x004be294);
-    vtKillPed       =(void**)(base+0x00669848); // CTaskComplexKillPedOnFoot vtable
+    fnFindPlayerPed=(FindPlayerPed_t) FN(base,0x0040b288);
+    fnGetPad       =(GetPad_t)        FN(base,0x003f8ca4);
+    fnSprint       =(SprintJustDown_t)FN(base,0x003fbe14);
+    fnAddPed       =(AddPed_t)        FN(base,0x004cf26c);
+    fnWorldAdd     =(WorldAdd_t)      FN(base,0x004233c8);
+    fnClearTasks   =(ClearTasks_t)    FN(base,0x004c08ec);
+    fnSetDecision  =(SetDecision_t)   FN(base,0x004be294);
+    fnSetSeeing    =(SetRange_t)      FN(base,0x004c02d2);
+    fnSetHearing   =(SetRange_t)      FN(base,0x004c02cc);
 
     int cd=0;
     while(true){
@@ -89,7 +85,8 @@ static void* pollThread(void*) {
         if(cd>0){cd--;continue;}
         void* pad=fnGetPad(0);
         if(!pad||!fnSprint(pad)) continue;
-        cd=120; // 6 detik cooldown — cukup waktu animasi siap
+        cd=120;
+        wlog("SPAWN","Trigger!");
 
         void* player=fnFindPlayerPed(0);
         CVector pos;
@@ -99,27 +96,29 @@ static void* pollThread(void*) {
         snprintf(buf,sizeof(buf),"pos %.1f %.1f %.1f",pos.x,pos.y,pos.z);
         wlog("SPAWN",buf);
 
-        CVector sp={pos.x+2.0f,pos.y,pos.z};
-        void* npc=fnAddPed(4,0,&sp,false);
-        if(!npc){wlog("SPAWN","AddPed null");continue;}
-        fnWorldAdd(npc);
+        // Spawn 2 NPC random di sekitar player — biarkan mereka saling serang
+        for(int i=0;i<2;i++){
+            float ox = (i==0) ? 3.0f : -3.0f;
+            CVector sp={pos.x+ox, pos.y+2.0f, pos.z};
+            void* npc=fnAddPed(4,0,&sp,false);
+            if(!npc) continue;
+            fnWorldAdd(npc);
 
-        // Kasih waktu game init model NPC sebelum assign task
-        usleep(500000); // 500ms
+            void* intel=*(void**)((uint8_t*)npc+INTEL_OFF);
+            if(!intel) continue;
 
-        void* intel=*(void**)((uint8_t*)npc+INTEL_OFF);
-        if(!intel){wlog("SPAWN","intel null");continue;}
+            // Kosongkan task default
+            fnClearTasks(intel,true,true);
 
-        fnClearTasks(intel,true,true);
+            // Decision maker type 3 = sangat agresif (GANG_MEMBER hostile)
+            // Ini biarkan game handle AI sendiri — tidak ada manual task
+            fnSetDecision(intel,3);
 
-        // Buat task: CTaskComplexKillPedOnFoot(target, 0, 0, 0, 0, 0)
-        void* task=operator new(0x100);
-        memset(task,0,0x100);
-        *(void**)task=vtKillPed;
-        fnKillPedCtor(task,player,0,0,0,0,0);
-        fnAddTaskPrimary(intel,task,false);
-
-        wlog("SPAWN","NPC hostile spawned!");
+            // Extend seeing & hearing range biar cepat detect musuh
+            fnSetSeeing(intel, 50.0f);
+            fnSetHearing(intel, 50.0f);
+        }
+        wlog("SPAWN","2 NPC spawned, AI handled by game");
     }
     return nullptr;
 }
@@ -127,6 +126,6 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== SpawnNPC v3 ===");
+    wlog("LOAD","=== SpawnNPC v4 (no manual task) ===");
     pthread_t t; pthread_create(&t,nullptr,pollThread,nullptr); pthread_detach(t);
 }
