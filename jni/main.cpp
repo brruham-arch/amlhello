@@ -14,7 +14,7 @@
 #define INTEL_OFF  0x440
 
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","11.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","12.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
 static void wlog(const char* lv, const char* msg) {
@@ -68,22 +68,8 @@ static void assignFight(void* attacker, void* target) {
     fnAddTaskPrimary(intel, task, false);
 }
 
-// Validasi pad: cek pointer internal tidak null
-// Dari crash R0=0 dipanggil SprintJustDown — artinya pad valid tapi
-// field internal di dalam CPad masih null (pad belum diisi game)
-// CPad punya pointer ke NewState/OldState sekitar offset 0x00-0x10
-// Guard: cek 8 byte pertama pad tidak semua 0
-static bool isPadReady(void* pad) {
-    if(!pad) return false;
-    uint32_t* p = (uint32_t*)pad;
-    // Field pertama CPad biasanya bukan 0 kalau sudah init
-    // Cukup cek salah satu field berisi data valid
-    return (p[0]!=0 || p[1]!=0 || p[2]!=0 || p[3]!=0);
-}
-
 static void* pollThread(void*) {
-    // Sleep 20 detik — beri waktu game + pad fully init
-    sleep(20);
+    sleep(20); // tunggu game + pad fully init
     wlog("THREAD","started");
 
     uintptr_t base=getLibBase("libGTASA.so");
@@ -98,53 +84,51 @@ static void* pollThread(void*) {
     fnAddTaskPrimary =(AddTaskPrimary_t) FN(base,0x004c04c8);
     fnSimpleFightCtor=(SimpleFightCtor_t)FN(base,0x004d86b0);
 
-    // Tunggu pad ready — loop sampai pad berisi data
-    wlog("THREAD","waiting pad...");
-    int waited=0;
-    while(waited<60) {
-        void* p = fnGetPad(0);
-        if(isPadReady(p)) { wlog("THREAD","pad ready"); break; }
-        sleep(1); waited++;
-    }
-
+    wlog("THREAD","polling");
     int cd=0;
     while(true){
         usleep(50000);
         if(cd>0){cd--;continue;}
 
+        // Hanya null check — tidak ada logika pad ready lain
         void* pad=fnGetPad(0);
-        // Guard ketat: pad harus valid DAN berisi data
-        if(!pad || !isPadReady(pad)) continue;
+        if(!pad) continue;
         if(!fnSprint(pad)) continue;
         cd=120;
+        wlog("SPAWN","trigger!");
 
         void* player=fnFindPlayerPed(0);
         CVector pos;
         if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
-        // Model 0 — selalu loaded
+        char buf[64];
+        snprintf(buf,sizeof(buf),"pos %.0f %.0f %.1f",pos.x,pos.y,pos.z);
+        wlog("SPAWN",buf);
+
         CVector sp1={pos.x+3.0f, pos.y,      pos.z+0.5f};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z+0.5f};
 
         void* npc1=fnAddPed(4, 0, &sp1, false);
         void* npc2=fnAddPed(4, 0, &sp2, false);
 
+        snprintf(buf,sizeof(buf),"npc1=%p npc2=%p",npc1,npc2);
+        wlog("SPAWN",buf);
+
         if(!npc1||!npc2){
             if(npc1) fnWorldAdd(npc1);
             if(npc2) fnWorldAdd(npc2);
-            wlog("SPAWN","fail"); continue;
+            wlog("SPAWN","AddPed fail"); continue;
         }
 
         fnWorldAdd(npc1);
         fnWorldAdd(npc2);
-        usleep(200000); // 200ms biar NPC init sebelum assign task
+        wlog("SPAWN","WorldAdd OK");
+
+        usleep(200000);
 
         assignFight(npc1, npc2);
         assignFight(npc2, npc1);
-
-        char buf[48];
-        snprintf(buf,sizeof(buf),"spawned @ %.0f %.0f z%.1f",pos.x,pos.y,pos.z);
-        wlog("SPAWN",buf);
+        wlog("SPAWN","task assigned OK");
     }
     return nullptr;
 }
@@ -152,7 +136,7 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v11 ===");
+    wlog("LOAD","=== FightNPC v12 ===");
     pthread_t t;
     pthread_create(&t,nullptr,pollThread,nullptr);
     pthread_detach(t);
