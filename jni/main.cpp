@@ -102,7 +102,7 @@ static void assignFight(void* npc, void* target) {
     void* task=malloc(0x80);
     if(!task) return;
     memset(task,0,0x80);
-    fnSimpleFightCtor(task, target, 0, 0);
+    fnSimpleFightCtor(task, target, 1, 0);
     fnAddTaskPrimary(intel, task, false);
 }
 
