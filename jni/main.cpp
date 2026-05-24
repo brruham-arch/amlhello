@@ -14,8 +14,13 @@
 #define INTEL_OFF  0x440
 #define HEALTH_OFF 0x3C
 
+// Slot task manager GTA SA:
+// 0 = PRIMARY_DEFAULT (dipakai AI normal, GangFollower, dll)
+// 4 = PRIMARY_SCRIPTED (dipakai script misi, aman dari AI override)
+#define TASK_SLOT_SCRIPTED 4
+
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","6.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","7.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
 static void wlog(const char* lv, const char* msg) {
@@ -40,15 +45,17 @@ typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
 typedef void  (*KillMeleeCtor_t)(void*,void*);
-typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
+// CTaskManager::SetTask(CTask* task, int slot, bool immediate)
+// intel == &m_TaskMgr (offset 0 di CPedIntelligence)
+typedef void  (*SetTask_t)(void*,void*,int,bool);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
 static SprintJustDown_t fnSprint;
 static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
-static AddTaskPrimary_t fnAddTaskPrimary;
 static KillMeleeCtor_t  fnKillMeleeCtor;
+static SetTask_t        fnSetTask;
 
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
@@ -58,17 +65,19 @@ static bool getPedPos(void* ped, CVector& out) {
     return true;
 }
 
-// Assign task sekali — game yang handle lifecycle task selanjutnya
-// malloc agar game bisa free dengan free() yang kompatibel
-static void assignMeleeOnce(void* attacker, void* target) {
+static void assignScriptedMelee(void* attacker, void* target) {
     if(!attacker||!target) return;
     void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
+
     void* task=malloc(0x200);
     if(!task) return;
     memset(task,0,0x200);
     fnKillMeleeCtor(task, target);
-    fnAddTaskPrimary(intel, task, false);
+
+    // Taruh di slot SCRIPTED (4) — aman dari GangFollower/AI override
+    // intel == &m_TaskMgr karena m_TaskMgr ada di offset 0 CPedIntelligence
+    fnSetTask(intel, task, TASK_SLOT_SCRIPTED, true);
 }
 
 static void* pollThread(void*) {
@@ -83,8 +92,8 @@ static void* pollThread(void*) {
     fnSprint        =(SprintJustDown_t)FN(base,0x003fbe14);
     fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
-    fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
     fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
+    fnSetTask       =(SetTask_t)       FN(base,0x0053390a);
 
     int cd=0;
     while(true){
@@ -98,8 +107,6 @@ static void* pollThread(void*) {
         CVector pos;
         if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
-        // Spawn 2 NPC, offset berbeda tiap pasang
-        // Jarak 3m dan 5m agar tidak overlap (bisa crash jika di titik sama)
         CVector sp1={pos.x+3.0f, pos.y,      pos.z};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
 
@@ -107,19 +114,17 @@ static void* pollThread(void*) {
         void* npc2=fnAddPed(4,0,&sp2,false);
 
         if(!npc1||!npc2){
-            wlog("SPAWN","AddPed fail");
             if(npc1) fnWorldAdd(npc1);
             if(npc2) fnWorldAdd(npc2);
-            continue;
+            wlog("SPAWN","AddPed fail"); continue;
         }
 
         fnWorldAdd(npc1);
         fnWorldAdd(npc2);
 
-        // Assign task SEKALI saja — tidak ada monitor thread
-        // Game akan handle task lifecycle sendiri
-        assignMeleeOnce(npc1, npc2);
-        assignMeleeOnce(npc2, npc1);
+        // Assign ke slot SCRIPTED — tidak konflik dengan GangFollower di slot lain
+        assignScriptedMelee(npc1, npc2);
+        assignScriptedMelee(npc2, npc1);
 
         char buf[48];
         snprintf(buf,sizeof(buf),"spawned %.0f %.0f",pos.x,pos.y);
@@ -131,7 +136,7 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v6 — no monitor thread ===");
+    wlog("LOAD","=== FightNPC v7 — slot SCRIPTED ===");
     pthread_t t;
     pthread_create(&t,nullptr,pollThread,nullptr);
     pthread_detach(t);
