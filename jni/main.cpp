@@ -9,19 +9,14 @@
 #define EXPORT extern "C" __attribute__((visibility("default")))
 #define TAG      "BURHAN_AML"
 #define LOG_PATH "/sdcard/burhan_aml_log.txt"
-#define MAX_NPCS   32
 #define MATRIX_OFF 0x14
 #define POS_OFF    0x30
 #define INTEL_OFF  0x440
 #define HEALTH_OFF 0x3C
 
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","5.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","6.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
-
-static void* g_npcs[MAX_NPCS] = {};
-static int   g_npcCount = 0;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void wlog(const char* lv, const char* msg) {
     __android_log_print(ANDROID_LOG_INFO,TAG,"[%s] %s",lv,msg);
@@ -62,58 +57,18 @@ static bool getPedPos(void* ped, CVector& out) {
     out=*(CVector*)((uint8_t*)mx+POS_OFF);
     return true;
 }
-static bool isPedAlive(void* ped) {
-    if(!ped) return false;
-    return *(float*)((uint8_t*)ped+HEALTH_OFF) > 0.1f;
-}
 
-// Gunakan malloc — heap sama dengan GTA SA, bukan heap .so kita
-// false = jangan flush task lama, cukup tambah sebagai primary baru
-static void assignMeleeTask(void* attacker, void* target) {
+// Assign task sekali — game yang handle lifecycle task selanjutnya
+// malloc agar game bisa free dengan free() yang kompatibel
+static void assignMeleeOnce(void* attacker, void* target) {
     if(!attacker||!target) return;
-    if(!isPedAlive(attacker)||!isPedAlive(target)) return;
     void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
-
-    void* task = malloc(0x200);
+    void* task=malloc(0x200);
     if(!task) return;
-    memset(task, 0, 0x200);
+    memset(task,0,0x200);
     fnKillMeleeCtor(task, target);
-    fnAddTaskPrimary(intel, task, false); // false — tidak destroy task lama dari luar
-}
-
-// Monitor thread ringan — hanya reassign NPC yang sudah tidak punya target hidup
-// Tidak ada malloc/free di sini, hanya cek status
-static void* monitorThread(void*) {
-    sleep(12);
-    wlog("MON","started");
-    while(true) {
-        usleep(3000000); // 3 detik — cukup jarang
-
-        pthread_mutex_lock(&g_lock);
-        int count = g_npcCount;
-        void* snap[MAX_NPCS];
-        memcpy(snap, g_npcs, sizeof(void*)*count);
-        pthread_mutex_unlock(&g_lock);
-
-        if(count < 2) continue;
-
-        // Kumpulkan yang hidup
-        void* alive[MAX_NPCS]; int ac=0;
-        for(int i=0;i<count;i++)
-            if(isPedAlive(snap[i])) alive[ac++]=snap[i];
-
-        if(ac < 2) continue;
-
-        // Reassign round-robin — hanya pakai malloc, tidak ada free/delete task
-        for(int i=0;i<ac;i++)
-            assignMeleeTask(alive[i], alive[(i+1)%ac]);
-
-        char buf[32];
-        snprintf(buf,sizeof(buf),"alive:%d",ac);
-        wlog("MON",buf);
-    }
-    return nullptr;
+    fnAddTaskPrimary(intel, task, false);
 }
 
 static void* pollThread(void*) {
@@ -143,29 +98,32 @@ static void* pollThread(void*) {
         CVector pos;
         if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
-        pthread_mutex_lock(&g_lock);
-        if(g_npcCount>=MAX_NPCS-1){ g_npcCount=0; memset(g_npcs,0,sizeof(g_npcs)); }
-
+        // Spawn 2 NPC, offset berbeda tiap pasang
+        // Jarak 3m dan 5m agar tidak overlap (bisa crash jika di titik sama)
         CVector sp1={pos.x+3.0f, pos.y,      pos.z};
         CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
 
         void* npc1=fnAddPed(4,0,&sp1,false);
         void* npc2=fnAddPed(4,0,&sp2,false);
 
-        if(npc1){ fnWorldAdd(npc1); g_npcs[g_npcCount++]=npc1; }
-        if(npc2){ fnWorldAdd(npc2); g_npcs[g_npcCount++]=npc2; }
+        if(!npc1||!npc2){
+            wlog("SPAWN","AddPed fail");
+            if(npc1) fnWorldAdd(npc1);
+            if(npc2) fnWorldAdd(npc2);
+            continue;
+        }
+
+        fnWorldAdd(npc1);
+        fnWorldAdd(npc2);
+
+        // Assign task SEKALI saja — tidak ada monitor thread
+        // Game akan handle task lifecycle sendiri
+        assignMeleeOnce(npc1, npc2);
+        assignMeleeOnce(npc2, npc1);
 
         char buf[48];
-        snprintf(buf,sizeof(buf),"spawned, total:%d",g_npcCount);
+        snprintf(buf,sizeof(buf),"spawned %.0f %.0f",pos.x,pos.y);
         wlog("SPAWN",buf);
-        pthread_mutex_unlock(&g_lock);
-
-        // Assign task awal — malloc, bukan operator new
-        if(npc1&&npc2){
-            assignMeleeTask(npc1,npc2);
-            assignMeleeTask(npc2,npc1);
-            wlog("SPAWN","task assigned OK");
-        }
     }
     return nullptr;
 }
@@ -173,8 +131,8 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v5 — malloc heap fix ===");
-    pthread_t t1,t2;
-    pthread_create(&t1,nullptr,pollThread,nullptr);    pthread_detach(t1);
-    pthread_create(&t2,nullptr,monitorThread,nullptr); pthread_detach(t2);
+    wlog("LOAD","=== FightNPC v6 — no monitor thread ===");
+    pthread_t t;
+    pthread_create(&t,nullptr,pollThread,nullptr);
+    pthread_detach(t);
 }
