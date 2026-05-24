@@ -14,15 +14,8 @@
 #define INTEL_OFF  0x440
 #define HEALTH_OFF 0x3C
 
-// Tipe ped yang TIDAK mendapat CTaskComplexGangFollower dari AI:
-// 6 = PED_TYPE_MEDIC
-// 7 = PED_TYPE_FIREMAN
-// Keduanya akan bertarung via task kita tanpa interferensi GangFollower
-#define PED_TYPE_A 6
-#define PED_TYPE_B 7
-
 struct ModInfo { const char* name,*version,*author,*package; uint8_t handlerVer; };
-static ModInfo modinfo = {"AML FightNPC","8.0","Burhan","com.burhan.fightnpc",1};
+static ModInfo modinfo = {"AML FightNPC","9.0","Burhan","com.burhan.fightnpc",1};
 struct CVector { float x,y,z; };
 
 static void wlog(const char* lv, const char* msg) {
@@ -46,8 +39,11 @@ typedef void* (*GetPad_t)(int);
 typedef int   (*SprintJustDown_t)(void*);
 typedef void* (*AddPed_t)(int,unsigned int,const CVector*,bool);
 typedef void  (*WorldAdd_t)(void*);
-typedef void  (*KillMeleeCtor_t)(void*,void*);
 typedef void  (*AddTaskPrimary_t)(void*,void*,bool);
+// CTaskSimpleFight(CEntity* target, int type, unsigned int flags)
+// type=0 = default melee fight
+// flags=0
+typedef void* (*SimpleFightCtor_t)(void*, void*, int, unsigned int);
 
 static FindPlayerPed_t  fnFindPlayerPed;
 static GetPad_t         fnGetPad;
@@ -55,7 +51,7 @@ static SprintJustDown_t fnSprint;
 static AddPed_t         fnAddPed;
 static WorldAdd_t       fnWorldAdd;
 static AddTaskPrimary_t fnAddTaskPrimary;
-static KillMeleeCtor_t  fnKillMeleeCtor;
+static SimpleFightCtor_t fnSimpleFightCtor;
 
 static bool getPedPos(void* ped, CVector& out) {
     if(!ped) return false;
@@ -65,16 +61,20 @@ static bool getPedPos(void* ped, CVector& out) {
     return true;
 }
 
-static void assignMelee(void* attacker, void* target) {
+static void assignFight(void* attacker, void* target) {
     if(!attacker||!target) return;
     void* intel=*(void**)((uint8_t*)attacker+INTEL_OFF);
     if(!intel) return;
 
-    void* task=malloc(0x200);
+    // CTaskSimpleFight lebih kecil dari KillPedComplex, 0x80 cukup
+    void* task=malloc(0x80);
     if(!task) return;
-    memset(task,0,0x200);
-    fnKillMeleeCtor(task, target);
-    // false = tidak flush/override slot lain, cukup set primary
+    memset(task,0,0x80);
+
+    // Panggil ctor — ini set vtable + semua field dengan benar
+    // type=0 (default fight), flags=0
+    fnSimpleFightCtor(task, target, 0, 0);
+
     fnAddTaskPrimary(intel, task, false);
 }
 
@@ -91,7 +91,8 @@ static void* pollThread(void*) {
     fnAddPed        =(AddPed_t)        FN(base,0x004cf26c);
     fnWorldAdd      =(WorldAdd_t)      FN(base,0x004233c8);
     fnAddTaskPrimary=(AddTaskPrimary_t)FN(base,0x004c04c8);
-    fnKillMeleeCtor =(KillMeleeCtor_t) FN(base,0x004e17cc);
+    // CTaskSimpleFightC2 — ctor verified dari nm
+    fnSimpleFightCtor=(SimpleFightCtor_t)FN(base,0x004d86b0);
 
     int cd=0;
     while(true){
@@ -105,12 +106,13 @@ static void* pollThread(void*) {
         CVector pos;
         if(!getPedPos(player,pos)){wlog("SPAWN","pos fail");continue;}
 
-        CVector sp1={pos.x+3.0f, pos.y,      pos.z};
-        CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z};
+        // z+2 hindari spawn di bawah tanah / air
+        CVector sp1={pos.x+3.0f, pos.y,      pos.z+0.5f};
+        CVector sp2={pos.x+5.0f, pos.y+2.0f, pos.z+0.5f};
 
-        // MEDIC vs FIREMAN — keduanya tidak dapat GangFollower dari AI
-        void* npc1=fnAddPed(PED_TYPE_A, 0, &sp1, false);
-        void* npc2=fnAddPed(PED_TYPE_B, 0, &sp2, false);
+        // PED_TYPE_CIVMALE=4, model 108 = fat male, tidak punya weapon default
+        void* npc1=fnAddPed(4, 108, &sp1, false);
+        void* npc2=fnAddPed(4, 108, &sp2, false);
 
         if(!npc1||!npc2){
             if(npc1) fnWorldAdd(npc1);
@@ -121,14 +123,14 @@ static void* pollThread(void*) {
         fnWorldAdd(npc1);
         fnWorldAdd(npc2);
 
-        // Delay kecil biar WorldAdd selesai proses sebelum assign task
-        usleep(100000); // 100ms
+        // 200ms delay biar NPC fully initialized sebelum assign task
+        usleep(200000);
 
-        assignMelee(npc1, npc2);
-        assignMelee(npc2, npc1);
+        assignFight(npc1, npc2);
+        assignFight(npc2, npc1);
 
-        char buf[64];
-        snprintf(buf,sizeof(buf),"MEDIC vs FIREMAN @ %.0f %.0f",pos.x,pos.y);
+        char buf[48];
+        snprintf(buf,sizeof(buf),"spawned model 108 @ %.0f %.0f",pos.x,pos.y);
         wlog("SPAWN",buf);
     }
     return nullptr;
@@ -137,7 +139,7 @@ static void* pollThread(void*) {
 EXPORT ModInfo* __GetModInfo(){return &modinfo;}
 EXPORT void OnModPreLoad(){remove(LOG_PATH);wlog("PRELOAD","OK");}
 EXPORT void OnModLoad(){
-    wlog("LOAD","=== FightNPC v8 — medic vs fireman ===");
+    wlog("LOAD","=== FightNPC v9 — CTaskSimpleFight ===");
     pthread_t t;
     pthread_create(&t,nullptr,pollThread,nullptr);
     pthread_detach(t);
